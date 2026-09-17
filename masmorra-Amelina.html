@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>A Masmorra de Amelina</title>
+<style>
+  :root {
+    --bg: #f4f1ea; --panel: #ffffff; --text: #241820; --muted: #6b5c66;
+    --accent: #7a1f3d; --accent-light: #a13a5c; --border: #d9cfd4; --input-bg: #ffffff;
+    --dice: #2f6f4f; --dice-fail: #a13a3a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #140f13; --panel: #1f1620; --text: #ece4e8; --muted: #b09aa5;
+      --accent: #d1476a; --accent-light: #e87d9a; --border: #3a2a32; --input-bg: #2a1c22;
+      --dice: #5fd39a; --dice-fail: #e8747a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #140f13; --panel: #1f1620; --text: #ece4e8; --muted: #b09aa5;
+    --accent: #d1476a; --accent-light: #e87d9a; --border: #3a2a32; --input-bg: #2a1c22;
+    --dice: #5fd39a; --dice-fail: #e8747a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh; display: flex; justify-content: center; padding: 24px 16px;
+  }
+  .wrap { width: 100%; max-width: 680px; }
+  h1 {
+    text-align: center; color: var(--accent); letter-spacing: 1px;
+    font-size: clamp(1.3rem, 4vw, 1.9rem); margin: 0 0 4px;
+  }
+  .subtitle { text-align: center; color: var(--muted); font-size: 0.9rem; margin-bottom: 18px; }
+  #log {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px; min-height: 340px; max-height: 55vh; overflow-y: auto; line-height: 1.65;
+  }
+  #log p { margin: 0 0 14px; }
+  .scene-title { color: var(--accent); font-weight: bold; margin-bottom: 6px; }
+  .you { color: var(--accent-light); font-style: italic; }
+  .sys { color: var(--muted); font-size: 0.85rem; }
+  .roll { font-weight: bold; }
+  .roll.success { color: var(--dice); }
+  .roll.fail { color: var(--dice-fail); }
+  .warn { color: var(--dice-fail); font-style: italic; }
+  form { display: flex; gap: 8px; margin-top: 12px; }
+  input[type=text] {
+    flex: 1; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--input-bg); color: var(--text); font-family: inherit; font-size: 1rem;
+  }
+  input[type=text]:focus { outline: 2px solid var(--accent-light); }
+  button {
+    padding: 12px 18px; border: none; border-radius: 8px; background: var(--accent);
+    color: #fff; font-family: inherit; font-weight: bold; cursor: pointer;
+  }
+  button:hover { background: var(--accent-light); }
+  .hints { margin-top: 8px; font-size: 0.8rem; color: var(--muted); }
+  .restart { display: none; margin-top: 10px; text-align: center; }
+  .restart button { background: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1> A Masmorra</h1>
+  <div class="subtitle">Digite o que você quer fazer — ex: "entrar", "ler bíblia", "orar", "invocar fé"</div>
+
+  <div id="log"></div>
+
+  <form id="form">
+    <input id="input" type="text" autocomplete="off" placeholder="O que você faz?" autofocus />
+    <button type="submit">Ir</button>
+  </form>
+  <div class="hints">Dica: digite "ajuda" a qualquer momento para ver os comandos da cena.</div>
+
+  <div class="restart" id="restartBox">
+    <button id="restartBtn">🔄 Jogar novamente</button>
+  </div>
+</div>
+
+<script>
+/* =====================================================================
+   1) ESTADO
+   - scene: cena atual
+   - flags: coisas que o jogador descobriu (mudam a narrativa)
+   - rolls: registra quais testes de d20 já foram tentados, pelo "id"
+     do teste. É isso que impede repetir uma rolagem.
+   ===================================================================== */
+let state = {
+  scene: "entrada",
+  flags: {},
+  rolls: {}   // ex: state.rolls.passagemCorredor = { tried: true, result: 14 }
+};
+
+/* =====================================================================
+   2) SISTEMA DE TESTE DE D20
+   attemptCheck(id, dc, onSuccess, onFail):
+   - id: identificador único do teste (você escolhe o nome)
+   - dc: "dificuldade" — o valor mínimo que precisa tirar no dado
+   - onSuccess(roll): roda se roll >= dc
+   - onFail(roll): roda se roll < dc (opcional)
+   Se o jogador já tentou esse "id" antes, NÃO rola de novo — mostra o aviso.
+   ===================================================================== */
+function rollD20() {
+  return Math.floor(Math.random() * 20) + 1;
+}
+
+/* Dificuldade do teste de Fé Verdadeira: começa em 16 e fica mais fácil
+   conforme o inquisidor se preparou (leu o Daemonologie, orou no altar). */
+function faithDC() {
+  let dc = 16;
+  if (state.flags.leuDaemonologie) dc -= 3;
+  if (state.flags.orouAltar) dc -= 2;
+  return Math.max(dc, 8);
+}
+
+function attemptCheck(id, dc, onSuccess, onFail) {
+  if (state.rolls[id] && state.rolls[id].tried) {
+    warn("Você deveria poupar seus esforços para sair com vida.");
+    return;
+  }
+
+  const roll = rollD20();
+  state.rolls[id] = { tried: true, result: roll };
+
+  const ok = roll >= dc;
+  showRoll(roll, dc, ok);
+
+  if (ok) {
+    onSuccess(roll);
+  } else if (onFail) {
+    onFail(roll);
+  } else {
+    say("Nada chama sua atenção.");
+  }
+}
+
+/* =====================================================================
+   3) CENAS
+   Ações agora podem ser de dois tipos:
+   - run: acontece direto (sem dado)
+   - check: exige um teste de d20 antes de decidir o resultado
+   ===================================================================== */
+const SCENES = {
+
+  entrada: {
+    title: "A Entrada da Masmorra",
+    text: () => "Você está diante de uma entrada para uma espécie de masmorra, que parece uma gruta e um bunker ao mesmo tempo. " +
+                "O ar cheira a mofo, água parada e ferrugem. O céu está escuro e a noite está fria.",
+    actions: [
+      { match: ["voltar", "fugir", "ir embora", "sair"], run: () => say("Você tem um propósito divino aqui, não tema o demônio. Covardia é heresia.") },
+      { match: ["entrar", "avancar", "seguir", "ir"], run: () => goto("escada") },
+      { match: ["olhar", "examinar"], run: () => say("A sua tocha não ilumina o final das escadas, levando a uma escuridão que abala sua fé") },
+    ]
+  },
+
+  escada: {
+    title: "A Escadaria",
+    text: () => "O enorme lance de escadas não parece ter fim, só é possível ouvir o sibilar do vento nas suas costas. " +
+    "Parece que não é somente o vento... tente escutar.",
+    actions: [
+      { match: ["voltar", "sair"], run: () => say("Deus está contigo, inquisidor, seja forte") },
+      { match: ["descer", "seguir"], run: () => goto("porta") },
+      { match: ["tatear", "apoiar", "tocar", "observar"], run: () => say("A parede esfarela na sua mão conforme toca")},
+      // ---- TESTE DE D20 ----
+      { match: ["ouvir", "escutar", "prestar atencao"],
+        check: () => attemptCheck(
+          "escadaPresenca", // id único do teste
+          15,                  // DC: precisa tirar 15+ no d20
+          () => say("Ela já sabe que está aqui."),                 // sucesso
+          () => say("Ou talvez seja só um pressentimento") // falha
+        )
+      },
+    ]
+  },
+
+  porta: {
+    title: "A Porta",
+    text: () => "Uma enorme porta de pedra espera fechada no final, cravada com uma cruz.",
+    actions: [
+      { match: ["abrir"], run: () => goto("corredor") },
+      { match: ["bater"], run: () => say("Quase não produz som, a porta é muito espessa.") },
+    ]
+  },
+
+  corredor: {
+    title: "O Corredor",
+     text: () => "Um corredor de pedras conservadas e polidas, que ramifica em 3 direções: esquerda, meio e direita.",
+     actions: [
+      { match: ["esquerda", "ir a esquerda"], run: () => goto("biblioteca") },
+      { match: ["meio", "reto", "centro", "ir reto", "ir para o meio"], run: () => goto("salao") },
+      { match: ["direita", "ir a direita"], run: () => goto("altar") },
+     ]
+  },
+
+  biblioteca: {
+    title: "A Biblioteca",
+    text: () => "Diversas estantes com dezenas de livros perfeitamente conservados. No meio, uma grande bíblia está aberta sobre um púlpito.",
+    actions: [
+      { match: ["ler biblia", "ler a biblia", "ver a biblia", "biblia", "ver o pulpito", "pulpito", "meio"], run: () => {
+          say("Está aberto em Ezequiel 25:17: Executarei grande vingança sobre eles com furiosas repreensões;" + 
+          "e saberão que eu sou o SENHOR, quando eu exercer a minha vingança sobre eles."); } },
+      { match: ["ver estante", "estante", "ver estantes", "estantes"], run: () => {
+         state.flags.sabeOrigem = true;
+         say ("São livros muito antigos, mas perfeitamente conservados. Na coleção, inclui o livro original Daemonologie do rei Jaime I e o livro Golconda")
+      }},
+      { match: ["ler daemonologie", "ler o daemonologie", "daemonologie"], run: () => {
+          if (!state.flags.sabeOrigem) { say("Nada nas estantes parece se destacar ainda — talvez valha a pena examiná-las primeiro."); return; }
+          state.flags.leuDaemonologie = true;
+          say("O Daemonologie, atribuído ao próprio rei Jaime I, descreve rituais de caça a bruxas e criaturas das trevas. " +
+              "Nas margens, alguém escreveu à mão inúmeros nomes, alguns riscados e outros não. Você reconhece, são nomes de cainitas que também são marcados pela igreja");
+        }
+      },
+      { match: ["ler golconda", "ler o golconda", "golconda"], run: () => {
+          if (!state.flags.sabeOrigem) { say("Nada nas estantes parece se destacar ainda — talvez valha a pena examiná-las primeiro."); return; }
+          state.flags.leuGolconda = true;
+          say("O livro do Golconda fala de um estado quase mítico: a promessa de que até as criaturas mais amaldiçoadas podem encontrar paz, " +
+              "se abandonarem a Besta que carregam dentro de si. Você reconhece que se trata de um clã que é um mito entre os vampiros, os Salubri");
+        }
+      },
+      { match: ["voltar", "corredor", "sair"], run: () => goto("corredor") },
+    ]
+  },
+
+  salao: {
+    title: "O Salão do Caixão",
+    text: () => "Um salão amplo e frio. No centro, um caixão polido de prata repousa sobre um pedestal, " +
+                "banhado em sangue que escorre lentamente pelas bordas gravadas. " +
+                "Você sente que seu alvo está próximo.",
+    actions: [
+      { match: ["abrir caixao", "abrir o caixao", "espiar"], run: () => goto("confronto") },
+      { match: ["voltar", "sair", "fugir"], run: () => goto("finalFuga") },
+    ]
+  },
+
+  altar: {
+    title: "O Altar",
+    text: () => "Uma visão bela em meio a uma masmorra, uma igreja perfeitamente conservada, com vitrais de imagens divinas e um grande altar no meio.",
+    actions: [
+      { match: ["orar", "rezar", "ajoelhar"], run: () => {
+          if (state.flags.orouAltar) { say("Você já fez suas preces aqui. Sua fé permanece firme."); return; }
+          state.flags.orouAltar = true;
+          say("Você se ajoelha diante do altar e reza. Uma calma incomum toma seu peito.");
+        }
+      },
+      { match: ["voltar", "corredor", "sair"], run: () => goto("corredor") },
+    ]
+  },
+
+  confronto: {
+    title: "A Vampira Desperta",
+    text: () => "A tampa do caixão de prata se abre com um estrondo, sangue escorrendo pelas bordas polidas. " +
+                "Mas não havia nada. Atrás de você, uma mulher alta está te observando. " +
+                "O que você deseja fazer? ",
+    actions: [
+      { match: ["fugir", "correr","desisitir"], run: () => goto("finalPerdicao") },
+      { match: ["invocar fe", "invocar a fe", "usar fe verdadeira", "fe verdadeira", "rezar", "orar", "erguer a cruz", "usar a cruz", "confiar em deus"],
+        check: () => attemptCheck(
+          "confrontoFe",
+          faithDC(),
+          () => state.flags.leuGolconda ? goto("finalSalubri") : goto("finalCoragem"),
+          () => goto("finalDerrota")
+        )
+      },
+      { match: ["atacar", "brandir espada", "golpear"], run: () => goto("finalExecutado") }
+    ],
+  },
+}
+
+  // ---- FINAIS ----
+  finalExecutado: {
+    title: "FINAL: Execução",
+    text: () =>"Você brande a espada e avança em direção a vampira. Com um contra-ataque simples ela te desarma e acerta seu joelho. Antes mesmo que consiga olhar para cima, um tiro acerta seu rosto",
+    ending: true
+  }
+
+  finalSalubri: {
+    title: "FINAL: Criatura da noite",
+    text: () => "Sua fé arde forte e sem medo, fazendo a vampira recuar alguns passos. mas as palavras do Golconda, lidas há pouco " +
+                "na biblioteca, ecoam em sua mente: a promessa de uma iluminação por meio do sofrimento de uma maldição. " +
+                "A vampira sorri, e entende seu olhar. " +
+                "'Você entende,' ela sussurra, maravilhada. 'Poucos mortais compreendem o Golconda.' " +
+                "Ela estende a mão fria. Naquele instante, entre a fé e a escuridão, algo se abre atrás dos seus olhos: " +
+                "um caminho que nenhum inquisidor jamais imaginou trilhar. Você não sabe ainda o que se tornará. Mas sabe que não é mais só um homem.",
+    ending: true
+  },
+
+  finalCoragem: {
+    title: "FINAL: Fé verdadeira",
+    text: () => "Você ergue a cruz e a fé verdadeira arde em seu peito, sem um tremor de dúvida, pois você confia plenamente em Deus. " +
+                "A vampira recua alguns passos, com um sorriso no rosto " +
+                "Você avança, brandindo seu símbolo sem qualquer medo. Ela some nas sombras das masmorras, e você sai sem cumprir sua missão",
+    ending: true
+  },
+
+  finalDerrota: {
+    title: "FINAL: Fé perdida",
+    text: () => "Você tenta invocar sua fé, mas encontra apenas o eco de suas próprias dúvidas. Amelina sorri, levemente desapontada. " +
+                "'Esperava mais, uma pena.'",
+    ending: true
+  },
+
+  finalPerdicao: {
+    title: "FINAL: A Fé Abandonada",
+    text: () => "O medo entra em seu peito como uma lâmina fria, e a fé que o guiou até aqui vacila. Amelina sente a rachadura " +
+                "antes mesmo que você perceba. 'Sua fé é frágil... tanto quanto seu corpo' ela sussurra, quase com pena. " +
+                "Em um piscar de olhos uma lâmina fria realmente penetra seu peito, te dando poucos segundos para sofrer por ter cedido",
+    ending: true
+  },
+
+  finalFuga: {
+    title: "FINAL: Covarde",
+    text: () => "Você dá as costas e tenta correr, mas acerta em cheio um corpo frio parado logo atrás de você. " +
+                "Antes que pudesse reagir, uma espada de prata separa sua perna de seu corpo. " +
+                "Você morre lentamente, sem poder reagir. Olhando para cima, se revela uma mulher alta que usa um chapéu de caçadores de bruxas de 2 séculos atrás. Abaixo dele, estava aquilo que você duvidava existir, um terceiro olho.",
+    ending: true
+  },
+
+  finalSilencio: {
+    title: "FINAL: Silêncio",
+    text: () => "Assim que sua boca se abre, sua garganta é rasgada pela lâmina prata. Você engasga com seu próprio sangue tentando balbuciar algo.",
+    ending:true
+  },
+
+
+/* =====================================================================
+   4) FUNÇÕES DE APOIO — engine (troca de cena, escrita no log)
+   ===================================================================== */
+function goto(sceneKey) {
+  state.scene = sceneKey;
+  renderScene();
+  if (SCENES[sceneKey].ending) endGame();
+}
+
+function say(text) {
+  const log = document.getElementById("log");
+  const p = document.createElement("p");
+  p.className = "sys";
+  p.textContent = text;
+  log.appendChild(p);
+  log.scrollTop = log.scrollHeight;
+}
+
+function warn(text) {
+  const log = document.getElementById("log");
+  const p = document.createElement("p");
+  p.className = "warn";
+  p.textContent = text;
+  log.appendChild(p);
+  log.scrollTop = log.scrollHeight;
+}
+
+function showRoll(roll, dc, ok) {
+  const log = document.getElementById("log");
+  const p = document.createElement("p");
+  p.innerHTML = `🎲 Você se esforça... <span class="roll ${ok ? "success" : "fail"}">${roll}</span> de 20, ` +
+                `${ok ? "parabéns." : "falhou."}`;
+  log.appendChild(p);
+  log.scrollTop = log.scrollHeight;
+}
+
+function renderScene() {
+  const scene = SCENES[state.scene];
+  const log = document.getElementById("log");
+  const block = document.createElement("p");
+  block.innerHTML = `<div class="scene-title">${scene.title}</div>${scene.text()}`;
+  log.appendChild(block);
+  log.scrollTop = log.scrollHeight;
+}
+
+function endGame() {
+  document.getElementById("input").disabled = true;
+  document.querySelector("button[type=submit]").disabled = true;
+  document.getElementById("restartBox").style.display = "block";
+}
+
+/* =====================================================================
+   5) PARSER
+   Agora precisa checar se a ação encontrada é do tipo "check" (rola dado)
+   ou "run" (acontece direto).
+   ===================================================================== */
+function normalize(txt) {
+  return txt.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function handleInput(raw) {
+  const log = document.getElementById("log");
+  const you = document.createElement("p");
+  you.className = "you";
+  you.textContent = "> " + raw;
+  log.appendChild(you);
+
+  const text = normalize(raw);
+  const scene = SCENES[state.scene];
+
+  if (text === "ajuda" || text === "help") {
+    const opcoes = scene.actions.map(a => a.match[0]).join(", ");
+    say(scene.ending ? "A história terminou. Clique em 'Jogar novamente'." : "Você pode tentar: " + opcoes);
+    return;
+  }
+  if (scene.ending) return;
+
+  const action = scene.actions.find(a => a.match.some(k => text.includes(normalize(k))));
+  if (action) {
+    if (action.check) action.check();
+    else action.run();
+  } else {
+    say("Isso não parece funcionar aqui. Digite 'ajuda' para ver algumas ideias.");
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+/* =====================================================================
+   6) LIGAÇÃO COM A INTERFACE
+   ===================================================================== */
+document.getElementById("form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const input = document.getElementById("input");
+  const val = input.value.trim();
+  if (!val) return;
+  handleInput(val);
+  input.value = "";
+});
+
+document.getElementById("restartBtn").addEventListener("click", () => location.reload());
+
+renderScene(); // começa o jogo
+</script>
+</body>
+</html>

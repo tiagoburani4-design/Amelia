@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<title>A Masmorra</title>
+<style>
+  :root {
+    --bg: #f4f1ea; --panel: #ffffff; --text: #241820; --muted: #6b5c66;
+    --accent: #7a1f3d; --accent-light: #a13a5c; --border: #d9cfd4; --input-bg: #ffffff;
+    --dice: #2f6f4f; --dice-fail: #a13a3a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #140f13; --panel: #1f1620; --text: #ece4e8; --muted: #b09aa5;
+      --accent: #d1476a; --accent-light: #e87d9a; --border: #3a2a32; --input-bg: #2a1c22;
+      --dice: #5fd39a; --dice-fail: #e8747a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #140f13; --panel: #1f1620; --text: #ece4e8; --muted: #b09aa5;
+    --accent: #d1476a; --accent-light: #e87d9a; --border: #3a2a32; --input-bg: #2a1c22;
+    --dice: #5fd39a; --dice-fail: #e8747a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: Georgia, 'Times New Roman', serif;
+    min-height: 100vh; display: flex; justify-content: center; padding: 24px 16px;
+  }
+  .wrap { width: 100%; max-width: 680px; }
+  h1 {
+    text-align: center; color: var(--accent); letter-spacing: 1px;
+    font-size: clamp(1.3rem, 4vw, 1.9rem); margin: 0 0 4px;
+  }
+  .subtitle { text-align: center; color: var(--muted); font-size: 0.9rem; margin-bottom: 18px; }
+  #log {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 18px; min-height: 340px; max-height: 55vh; overflow-y: auto; line-height: 1.65;
+  }
+  #log p { margin: 0 0 14px; }
+  .scene-title { color: var(--accent); font-weight: bold; margin-bottom: 6px; }
+  .you { color: var(--accent-light); font-style: italic; }
+  .sys { color: var(--muted); font-size: 0.85rem; }
+  .roll { font-weight: bold; }
+  .roll.success { color: var(--dice); }
+  .roll.fail { color: var(--dice-fail); }
+  .warn { color: var(--dice-fail); font-style: italic; }
+  form { display: flex; gap: 8px; margin-top: 12px; }
+  input[type=text] {
+    flex: 1; padding: 12px 14px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--input-bg); color: var(--text); font-family: inherit; font-size: 1rem;
+  }
+  input[type=text]:focus { outline: 2px solid var(--accent-light); }
+  button {
+    padding: 12px 18px; border: none; border-radius: 8px; background: var(--accent);
+    color: #fff; font-family: inherit; font-weight: bold; cursor: pointer;
+  }
+  button:hover { background: var(--accent-light); }
+  .hints { margin-top: 8px; font-size: 0.8rem; color: var(--muted); }
+  .restart { display: none; margin-top: 10px; text-align: center; }
+  .restart button { background: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1> A Masmorra</h1>
+  <div class="subtitle">Digite o que você quer fazer — ex: "entrar", "ler diário", "procurar passagem secreta"</div>
+
+  <div id="log"></div>
+
+  <form id="form">
+    <input id="input" type="text" autocomplete="off" placeholder="O que você faz?" autofocus />
+    <button type="submit">Ir</button>
+  </form>
+  <div class="hints">Dica: digite "ajuda" a qualquer momento para ver os comandos da cena.</div>
+
+  <div class="restart" id="restartBox">
+    <button id="restartBtn">🔄 Jogar novamente</button>
+  </div>
+</div>
+
+<script>
+/* =====================================================================
+   1) ESTADO
+   - scene: cena atual
+   - flags: coisas que o jogador descobriu (mudam a narrativa)
+   - rolls: registra quais testes de d20 já foram tentados, pelo "id"
+     do teste. É isso que impede repetir uma rolagem.
+   ===================================================================== */
+let state = {
+  scene: "entrada",
+  flags: {},
+  rolls: {}   // ex: state.rolls.passagemCorredor = { tried: true, result: 14 }
+};
+
+/* =====================================================================
+   2) SISTEMA DE TESTE DE D20
+   attemptCheck(id, dc, onSuccess, onFail):
+   - id: identificador único do teste (você escolhe o nome)
+   - dc: "dificuldade" — o valor mínimo que precisa tirar no dado
+   - onSuccess(roll): roda se roll >= dc
+   - onFail(roll): roda se roll < dc (opcional)
+   Se o jogador já tentou esse "id" antes, NÃO rola de novo — mostra o aviso.
+   ===================================================================== */
+function rollD20() {
+  return Math.floor(Math.random() * 20) + 1;
+}
+
+function attemptCheck(id, dc, onSuccess, onFail) {
+  if (state.rolls[id] && state.rolls[id].tried) {
+    warn("Você deveria poupar seus esforços para sair com vida.");
+    return;
+  }
+
+  const roll = rollD20();
+  state.rolls[id] = { tried: true, result: roll };
+
+  const ok = roll >= dc;
+  showRoll(roll, dc, ok);
+
+  if (ok) {
+    onSuccess(roll);
+  } else if (onFail) {
+    onFail(roll);
+  } else {
+    say("Nada chama sua atenção.");
+  }
+}
+
+/* =====================================================================
+   3) CENAS
+   Ações agora podem ser de dois tipos:
+   - run: acontece direto (sem dado)
+   - check: exige um teste de d20 antes de decidir o resultado
+   ===================================================================== */
+const SCENES = {
+
+  entrada: {
+    title: "A Entrada da Masmorra",
+    text: () => "Você está diante de uma entrada para uma espécie de masmorra, que parece uma gruta e um bunker ao mesmo tempo. " +
+                "O ar cheira a mofo, água parada e ferrugem. O céu está escuro e a noite está fria.",
+    actions: [
+      { match: ["voltar", "fugir", "ir embora", "sair"], run: () => say("Você tem um propósito divino aqui, não tema o demônio. Covardia é heresia.") },
+      { match: ["entrar", "avancar", "seguir", "ir"], run: () => goto("escada") },
+      { match: ["olhar", "examinar"], run: () => say("A sua tocha não ilumina o final das escadas, levando a uma escuridão que abala sua fé") },
+    ]
+  },
+
+  escada: {
+    title: "A Escadaria",
+    text: () => "O enorme lance de escadas não parece ter fim, só é possível ouvir o sibilar do vento nas suas costas. " +
+    "Parece que não é somente o vento... tente escutar.",
+    actions: [
+      { match: ["voltar", "sair"], run: () => say("Deus está contigo, inquisidor, seja forte") },
+      { match: ["descer", "seguir"], run: () => goto("porta") },
+      { match: ["tatear", "apoiar", "tocar", "observar"], run: () => say("A parede esfarela na sua mão conforme toca")},
+      // ---- TESTE DE D20 ----
+      { match: ["ouvir", "escutar", "prestar atencao"],
+        check: () => attemptCheck(
+          "escadaPresenca", // id único do teste
+          15,                  // DC: precisa tirar 15+ no d20
+          () => say("Ela já sabe que está aqui."),                 // sucesso
+          () => say("Ou talvez seja só um pressentimento") // falha
+        )
+      },
+    ]
+  },
+
+  porta: {
+    title: "A Porta",
+    text: () => "Uma enorme porta de pedra espera fechada no final, cravada com uma cruz.",
+    actions: [
+      { match: ["abrir"], run: () => goto("corredor") },
+      { match: ["bater"], run: () => say("Quase não produz som, a porta é muito espessa.") },
+    ]
+  },
+
+  corredor: {
+    title: "O Corredor",
+     text: () => "Um corredor de pedras conservadas e polidas, que ramifica em 3 direções: esquerda, meio e direita.",
+     actions: [
+      { match: ["esquerda", "ir a esquerda"], run: () => goto("biblioteca") },
+      { match: ["meio", "reto", "centro", "ir reto", "ir para o meio"], run: () => goto("salao") },
+      { match: ["direita", "ir a direita"], run: () => goto("altar") },
+     ]
+  },
+
+  biblioteca: {
+    title: "A Biblioteca",
+    text: () => "Diversas estantes com dezenas de livros perfeitamente conservados. No meio, uma grande bíblia está aberta sobre um púlpito.",
+    actions: [
+      { match: ["ler biblia", "ler a biblia", "ver a biblia", "biblia", "ver o pulpito", "pulpito", "meio"], run: () => {
+          say("Está aberto em Ezequiel 25:17: Executarei grande vingança sobre eles com furiosas repreensões;" + 
+          "e saberão que eu sou o SENHOR, quando eu exercer a minha vingança sobre eles."); } },
+      { match: ["ver estante", "estante", "ver estantes", "estantes"], run: () => {
+         state.flags.sabeOrigem = true;
+         say ("São livros muito antigos, mas perfeitamente conservados. Na coleção, inclui o livro original Daemonologie do rei Jaime I e o livro Golconda")
+      }},
+      { match: ["voltar", "corredor", "sair"], run: () => goto("corredor") },
+    ]
+  },
+
+  salao: {
+    title: "O Salão do Caixão",
+    text: () => "Um salão amplo e frio. No centro, um caixão de veludo negro repousa sobre um pedestal. " +
+                "As sombras parecem se mover sozinhas. Você sente que não está sozinho.",
+    actions: [
+      { match: ["abrir caixao", "abrir o caixao", "espiar"], run: () => goto("confronto") },
+      { match: ["voltar", "corredor", "sair", "fugir"], run: () => goto("finalFuga") },
+    ]
+  },
+
+  altar: {
+    title: "O Altar",
+    text: () => "Uma visão bela em meio a uma masmorra, uma igreja perfeitamente conservada, com vitrais de imagens divinas e um grande altar no meio.",
+  },
+
+  confronto: {
+    title: "Ilyana Desperta",
+    text: () => "A tampa do caixão se abre com um estrondo. Ilyana se ergue, pele pálida como lua, " +
+                "olhos vermelhos fixos em você. 'Um visitante...' ela sussurra, sorrindo com presas afiadas.",
+    actions: [
+      { match: ["encarar", "encara-la", "olhar nos olhos", "nao temer", "não temer"], run: () =>
+          state.flags.sabeFraqueza ? goto("finalCoragem") : goto("finalDerrota")
+      },
+      { match: ["fugir", "correr"], run: () => goto("finalFuga") },
+      { match: ["conversar", "falar"], run: () => goto("dialogo") },
+    ]
+  },
+
+  dialogo: {
+    title: "Palavras na Escuridão",
+    text: () => "'Fala', Ilyana diz, curiosa. 'Ninguém ousa conversar comigo há séculos. A maioria grita, ou foge.'",
+    actions: [
+      { match: ["perguntar", "quem e voce", "quem é você"], run: () => say("'Fui rainha aqui, antes de tudo isso apodrecer. Agora sou só... isto.' Ela parece, por um instante, cansada.") },
+      { match: ["encarar", "nao temer", "não temer"], run: () =>
+          (state.flags.sabeFraqueza && state.flags.viuRetrato) ? goto("finalVerdade") :
+          state.flags.sabeFraqueza ? goto("finalCoragem") : goto("finalDerrota")
+      },
+      { match: ["fugir", "correr"], run: () => goto("finalFuga") },
+    ]
+  },
+
+  // ---- FINAIS ----
+  finalVerdade: {
+    title: "FINAL: A Mulher Antes do Monstro",
+    text: () => "Você a encara sem medo — não porque a desafia, mas porque a reconhece: a mulher do retrato, " +
+                "perdida sob séculos de sangue e solidão. Ilyana congela, e por um momento algo humano cruza seu rosto. " +
+                "'Ninguém... nunca me viu assim,' ela sussurra. A masmorra, pela primeira vez em muito tempo, parece silenciosa em paz.",
+    ending: true
+  },
+
+  finalCoragem: {
+    title: "FINAL: Sem Medo",
+    text: () => "Lembrando do diário, você encara Ilyana sem desviar o olhar. Ela recua, confusa — " +
+                "'Você... não teme?' Pela primeira vez em séculos, alguém a vê como ela é, e não como um monstro.",
+    ending: true
+  },
+
+  finalDerrota: {
+    title: "FINAL: Presas na Escuridão",
+    text: () => "Você tenta encará-la, mas o medo é mais forte. Ilyana sorri, satisfeita. " +
+                "'Todos temem, no fim.' A escuridão do salão se fecha sobre você.",
+    ending: true
+  },
+
+  finalFuga: {
+    title: "FINAL: Sobrevivente",
+    text: () => "Você dá as costas e corre pelos corredores, atravessando o portão e desabando na grama " +
+                "molhada pelo orvalho, vivo — mas para sempre curioso sobre o que ficou para trás.",
+    ending: true
+  },
+};
+
+/* =====================================================================
+   4) FUNÇÕES DE APOIO — engine (troca de cena, escrita no log)
+   ===================================================================== */
+function goto(sceneKey) {
+  state.scene = sceneKey;
+  renderScene();
+  if (SCENES[sceneKey].ending) endGame();
+}
+
+function say(text) {
+  const log = document.getElementById("log");
+  const p = document.createElement("p");
+  p.className = "sys";
+  p.textContent = text;
+  log.appendChild(p);
+  log.scrollTop = log.scrollHeight;
+}
+
+function warn(text) {
+  const log = document.getElementById("log");
+  const p = document.createElement("p");
+  p.className = "warn";
+  p.textContent = text;
+  log.appendChild(p);
+  log.scrollTop = log.scrollHeight;
+}
+
+function showRoll(roll, dc, ok) {
+  const log = document.getElementById("log");
+  const p = document.createElement("p");
+  p.innerHTML = `🎲 Você se esforça... <span class="roll ${ok ? "success" : "fail"}">${roll}</span> de 20, ` +
+                `${ok ? "parabéns." : "falhou."}`;
+  log.appendChild(p);
+  log.scrollTop = log.scrollHeight;
+}
+
+function renderScene() {
+  const scene = SCENES[state.scene];
+  const log = document.getElementById("log");
+  const block = document.createElement("p");
+  block.innerHTML = `<div class="scene-title">${scene.title}</div>${scene.text()}`;
+  log.appendChild(block);
+  log.scrollTop = log.scrollHeight;
+}
+
+function endGame() {
+  document.getElementById("input").disabled = true;
+  document.querySelector("button[type=submit]").disabled = true;
+  document.getElementById("restartBox").style.display = "block";
+}
+
+/* =====================================================================
+   5) PARSER
+   Agora precisa checar se a ação encontrada é do tipo "check" (rola dado)
+   ou "run" (acontece direto).
+   ===================================================================== */
+function normalize(txt) {
+  return txt.toLowerCase().trim().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+}
+
+function handleInput(raw) {
+  const log = document.getElementById("log");
+  const you = document.createElement("p");
+  you.className = "you";
+  you.textContent = "> " + raw;
+  log.appendChild(you);
+
+  const text = normalize(raw);
+  const scene = SCENES[state.scene];
+
+  if (text === "ajuda" || text === "help") {
+    const opcoes = scene.actions.map(a => a.match[0]).join(", ");
+    say(scene.ending ? "A história terminou. Clique em 'Jogar novamente'." : "Você pode tentar: " + opcoes);
+    return;
+  }
+  if (scene.ending) return;
+
+  const action = scene.actions.find(a => a.match.some(k => text.includes(normalize(k))));
+  if (action) {
+    if (action.check) action.check();
+    else action.run();
+  } else {
+    say("Isso não parece funcionar aqui. Digite 'ajuda' para ver algumas ideias.");
+  }
+  log.scrollTop = log.scrollHeight;
+}
+
+/* =====================================================================
+   6) LIGAÇÃO COM A INTERFACE
+   ===================================================================== */
+document.getElementById("form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  const input = document.getElementById("input");
+  const val = input.value.trim();
+  if (!val) return;
+  handleInput(val);
+  input.value = "";
+});
+
+document.getElementById("restartBtn").addEventListener("click", () => location.reload());
+
+renderScene(); // começa o jogo
+</script>
+</body>
+</html>
